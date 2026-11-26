@@ -14,7 +14,7 @@ function storeSound(){try{localStorage.setItem(soundKey(),String(soundMuted));}c
 const teamLabel=t=>({fleet:'Fleet',inventory:'Inventário',both:'Fleet + Inventário'}[t]||'Sem equipe');
 const other=t=>t==='fleet'?'inventory':'fleet';
 function eligible(c,t){return workTeams().includes(t)&&c.status!=='done'&&(c.target_team===t||c.target_team==='both'||!!c[other(t)+'_validated']);}
-function canClaim(c,t){return eligible(c,t)&&!c[t+'_analyst']&&c[other(t)+'_analyst']!==me.id;}
+function canClaim(c,t){return eligible(c,t)&&!c[t+'_analyst']&&(dualRole()||c[other(t)+'_analyst']!==me.id);}
 const canManage=()=>['developer','manager','supervisor'].includes(hub?.role);
 function el(tag,t,cls){const e=document.createElement(tag);if(t!=null)e.textContent=t;if(cls)e.className=cls;return e;}
 function btn(t,fn){const b=el('button',t);b.type='button';b.onclick=async()=>{b.disabled=true;try{await fn();}catch(e){msg(e.message);}finally{b.disabled=false;}};return b;}
@@ -40,9 +40,10 @@ function card(c,firstByTeam={},carry=false){
  for(const team of ['fleet','inventory']){const b=el('div',null,'team-check');b.dataset.valid=String(!!c[team+'_validated']);b.append(el('strong',teamLabel(team)),el('span',c[team+'_validated']?'Validado · '+c[team+'_removed']+' pacote(s)':c[team+'_analyst']?'Em atendimento':'Pendente'));if(c[team+'_name'])b.append(el('small',c[team+'_name']));checks.append(b);}d.append(checks);
  const mismatch=c.fleet_validated&&c.inventory_validated&&(c.fleet_removed!==c.inventory_removed||c.fleet_reason!==c.inventory_reason);
  if(mismatch)d.append(el('p','Divergência nas validações. Confira quantidade e motivo.','mismatch'));
+ if(c.fleet_analyst&&c.fleet_analyst===c.inventory_analyst)d.append(el('p','Ambas as equipes assumidas pelo mesmo responsável (atuação de gestão).'));
  if(carry)d.append(el('p','Pendência de dia anterior','mismatch'));
  for(const team of workTeams()){
- if(firstByTeam[team]===c.id&&canClaim(c,team))d.append(btn('Assumir • '+teamLabel(team),async()=>{await rpc('spx_team_claim_as',{p_id:c.id,p_team:team});await load();}));
+ if(firstByTeam[team]===c.id&&canClaim(c,team))d.append(btn('Assumir • '+teamLabel(team),async()=>{if(c[other(team)+'_analyst']===me.id&&!confirm('Você já assumiu a outra equipe. Confirme a atuação também em '+teamLabel(team)+'.'))return;await rpc('spx_team_claim_as',{p_id:c.id,p_team:team});await load();}));
  if(canWork()&&c.status==='working'&&c[team+'_analyst']===me.id&&(!c[team+'_validated']||mismatch)){
  const f=el('form'),n=el('input'),r=el('select'),notes=el('textarea'),b=el('button',mismatch?'Corrigir validação':'Validar • '+teamLabel(team));
  n.type='number';n.min='0';n.max='100000';n.step='1';n.required=true;
@@ -63,7 +64,7 @@ async function load(){if(!hub)return;const req=++epoch,h=hub.id,{day,from,to}=da
  const [a,history]=await Promise.all([activePromise,historyPromise]);if(req!==epoch||hub?.id!==h)return;if(a.error)throw Error(a.error.message);
  const active=a.data,teams=workTeams(),isToday=x=>Date.parse(x.created)>=Date.parse(from)&&Date.parse(x.created)<Date.parse(to),daily=active.filter(isToday),carry=active.filter(x=>!isToday(x)),w=daily.filter(x=>x.status==='waiting');
  const firstByTeam=Object.fromEntries(teams.map(t=>[t,active.find(c=>canClaim(c,t))?.id]));
- const actionable=c=>teams.some(t=>eligible(c,t)&&!c[t+'_validated']&&((!c[t+'_analyst']&&c[other(t)+'_analyst']!==me.id)||c[t+'_analyst']===me.id));
+ const actionable=c=>teams.some(t=>eligible(c,t)&&!c[t+'_validated']&&((!c[t+'_analyst']&&(dualRole()||c[other(t)+'_analyst']!==me.id))||c[t+'_analyst']===me.id));
  if(soundEnabled()&&active.some(c=>{const old=seen.get(c.id);return (actionable(c)&&!old?.actionable)||(old&&Number(c.recall_count)>old.recalls&&teams.some(t=>eligible(c,t)&&[t,'both'].includes(c.last_recall_team)));})){beep();unlock();}
  seen=new Map(active.map(c=>[c.id,{recalls:Number(c.recall_count||0),actionable:actionable(c)}]));
  $('queue').replaceChildren(...daily.map(c=>card(c,firstByTeam)));if(!daily.length)$('queue').append(el('p','Nenhum chamado ativo no D-0.'));

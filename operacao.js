@@ -1,0 +1,85 @@
+import {createClient} from 'https://esm.sh/@supabase/supabase-js@2.49.4';
+const db=createClient('https://jbblmzoihmkevztdwbds.supabase.co','sb_publishable_65EbQLsH-TO7sldvcG0QrQ_rHOnAgFP');
+const $=id=>document.getElementById(id), msg=s=>$('message').textContent=s||'';
+let me,workspace,hub,channel,epoch=0,subEpoch=0,audio,pendingSound=false,seen=new Map(),drafts=new Map();
+const canWork=()=>['fleet','inventory'].includes(hub?.team)&&['developer','manager','supervisor','analyst'].includes(hub?.role);
+const teamLabel=t=>({fleet:'Fleet',inventory:'Inventário',both:'Fleet + Inventário'}[t]||'Sem equipe');
+const other=t=>t==='fleet'?'inventory':'fleet';
+function eligible(c){const t=hub?.team;return canWork()&&c.status!=='done'&&(c.target_team===t||c.target_team==='both'||!!c[other(t)+'_validated']);}
+const canManage=()=>['developer','manager','supervisor'].includes(hub?.role);
+function el(tag,t,cls){const e=document.createElement(tag);if(t!=null)e.textContent=t;if(cls)e.className=cls;return e;}
+function btn(t,fn){const b=el('button',t);b.type='button';b.onclick=async()=>{b.disabled=true;try{await fn();}catch(e){msg(e.message);}finally{b.disabled=false;}};return b;}
+async function rpc(n,p={}){const r=await db.rpc(n,p);if(r.error)throw Error(r.error.message);return r.data;}
+function form(id,fn){const f=$(id);f.onsubmit=async e=>{e.preventDefault();const b=f.querySelector('button[type="submit"],button:not([type])');if(b)b.disabled=true;try{await fn();msg('Alteração concluída.');}catch(e){msg(e.message);}finally{if(b)b.disabled=false;}};}
+$('google').onclick=async()=>{const r=await db.auth.signInWithOAuth({provider:'google',options:{redirectTo:location.origin+location.pathname,queryParams:{hd:'shopee.com'}}});if(r.error)msg(r.error.message);};
+$('logout').onclick=async()=>{await db.auth.signOut();location.reload();};
+function soundStatus(){ $('sound').textContent=audio?.state==='running'?'🔔 Som sempre ativo':'🔔 Liberar som (toque uma vez)';}
+function beep(){if(audio?.state!=='running'){pendingSound=true;return;}for(let i=0;i<2;i++){const o=audio.createOscillator(),g=audio.createGain(),at=audio.currentTime+i*.27;o.frequency.value=880;g.gain.setValueAtTime(.12,at);o.connect(g).connect(audio.destination);o.start(at);o.stop(at+.18);}}
+function unlock(test=false){if(!canWork())return;try{const AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;audio ||= new AC();audio.onstatechange=soundStatus;audio.resume().then(()=>{soundStatus();if(audio.state==='running'&&(pendingSound||test)){pendingSound=false;beep();}}).catch(soundStatus);soundStatus();}catch{soundStatus();}}
+$('sound').onclick=()=>unlock(true);document.addEventListener('pointerdown',()=>{if(audio?.state!=='running')unlock();},{capture:true});document.addEventListener('keydown',()=>{if(audio?.state!=='running')unlock();},{capture:true});document.addEventListener('visibilitychange',()=>{if(!document.hidden){unlock();load().catch(e=>msg(e.message));}});
+function duration(ms){let s=Math.max(0,Math.floor(ms/1000));return [Math.floor(s/3600),Math.floor(s/60)%60,s%60].map(x=>String(x).padStart(2,'0')).join(':');}
+function tick(){document.querySelectorAll('[data-clock]').forEach(e=>e.textContent=duration((e.dataset.end?Date.parse(e.dataset.end):Date.now())-Date.parse(e.dataset.clock)));}
+function card(c,first){
+ const d=el('article',null,'card callcard');d.dataset.status=c.status;
+ const top=el('div',null,'calltop');top.append(el('h3','Bancada '+String(c.dock).padStart(2,'0')),el('span',teamLabel(c.target_team),'team-pill'));d.append(top,el('p',c.shift+' · '+new Date(c.created).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'})+' · '+({waiting:'Aguardando',working:'Em atendimento',done:'Finalizado'}[c.status])));
+ const t=el('strong');t.dataset.clock=c.created;if(c.finished)t.dataset.end=c.finished;d.append(el('small','Tempo total '),t);
+ if(c.recall_count)d.append(el('p','🔔 Rechamadas: '+c.recall_count+' · '+teamLabel(c.last_recall_team)));
+ const checks=el('div',null,'team-checks');
+ for(const team of ['fleet','inventory']){const b=el('div',null,'team-check');b.dataset.valid=String(!!c[team+'_validated']);b.append(el('strong',teamLabel(team)),el('span',c[team+'_validated']?'Validado · '+c[team+'_removed']+' pacote(s)':c[team+'_analyst']?'Em atendimento':'Pendente'));if(c[team+'_name'])b.append(el('small',c[team+'_name']));checks.append(b);}d.append(checks);
+ const mismatch=c.fleet_validated&&c.inventory_validated&&(c.fleet_removed!==c.inventory_removed||c.fleet_reason!==c.inventory_reason);
+ if(mismatch)d.append(el('p','Divergência nas validações. Confira quantidade e motivo.','mismatch'));
+ const team=hub?.team;
+ if(first&&eligible(c)&&!c[team+'_analyst'])d.append(btn('Assumir • '+teamLabel(team),async()=>{await rpc('spx_team_claim',{p_id:c.id});await load();}));
+ if(canWork()&&c.status==='working'&&c[team+'_analyst']===me.id&&(!c[team+'_validated']||mismatch)){
+ const f=el('form'),n=el('input'),r=el('select'),notes=el('textarea'),b=el('button',mismatch?'Corrigir validação':'Validar • '+teamLabel(team));
+ n.type='number';n.min='0';n.max='100000';n.step='1';n.required=true;
+ for(const v of ['Volumetria','Capacidade do veículo','Divergência','Outros']){const o=el('option',v);o.value=v;r.append(o);}
+ notes.maxLength=500;notes.placeholder='Observações (opcional)';
+ const old=drafts.get(c.id);if(old){n.value=old.n;r.value=old.r;notes.value=old.notes;}else if(c[team+'_validated']){n.value=c[team+'_removed'];if(c[team+'_reason']!=='Sem remoção')r.value=c[team+'_reason'];notes.value=c[team+'_notes']||'';}
+ f.oninput=()=>drafts.set(c.id,{n:n.value,r:r.value,notes:notes.value});f.append(el('label','Pacotes removidos (informe zero se não houve)'),n,el('label','Motivo da remoção'),r,notes,b);f.onsubmit=async e=>{e.preventDefault();b.disabled=true;try{await rpc('spx_team_validate',{p_id:c.id,p_removed:Number(n.value),p_reason:r.value,p_notes:notes.value});drafts.delete(c.id);await load();}catch(e){msg(e.message);}finally{b.disabled=false;}};d.append(f);}
+ if(c.status==='done')d.append(el('p','Removidos confirmados: '+(c.removed??0)+' · '+(c.reason||'')));
+ return d;
+}
+const columns='id,seq,dock,shift,status,created,claimed,finished,removed,reason,recall_count,last_recall,last_recall_team,target_team,fleet_analyst,fleet_name,fleet_claimed,fleet_validated,fleet_removed,fleet_reason,fleet_notes,inventory_analyst,inventory_name,inventory_claimed,inventory_validated,inventory_removed,inventory_reason,inventory_notes';
+async function load(){if(!hub)return;const req=++epoch,h=hub.id;const [a,b]=await Promise.all([db.from('spx_calls').select(columns).eq('hub_id',h).eq('source','production').in('status',['waiting','working']).order('seq').limit(30),db.from('spx_calls').select(columns).eq('hub_id',h).eq('source','production').eq('status','done').order('seq',{ascending:false}).limit(100)]);if(req!==epoch||hub?.id!==h)return;if(a.error||b.error)throw Error((a.error||b.error).message);const active=a.data,history=b.data,w=active.filter(x=>x.status==='waiting'),team=hub.team;
+ const first=active.find(c=>eligible(c)&&!c[team+'_analyst']);const actionable=c=>eligible(c)&&!c[team+'_validated']&&(!c[team+'_analyst']||c[team+'_analyst']===me.id);
+ if(canWork()&&active.some(c=>{const old=seen.get(c.id);return (actionable(c)&&!old?.actionable)||(old&&eligible(c)&&Number(c.recall_count)>old.recalls&&[team,'both'].includes(c.last_recall_team));})){beep();unlock();}
+ seen=new Map(active.map(c=>[c.id,{recalls:Number(c.recall_count||0),actionable:actionable(c)}]));
+ $('queue').replaceChildren(...active.map(c=>card(c,c.id===first?.id)));if(!active.length)$('queue').append(el('p','Nenhum chamado ativo neste HUB.'));
+ $('history').replaceChildren(...history.map(c=>card(c,false)));
+ $('metrics').replaceChildren(...[['Aguardando primeira equipe',w.length],['Em atendimento / validação',active.length-w.length],['Finalizados (últimos 100)',history.length],['Removidos (últimos 100)',history.reduce((s,c)=>s+(c.removed||0),0)]].map(([t,n])=>{const d=el('div',t,'metric');d.append(el('strong',n));return d;}));tick();}
+async function management(){const h=hub?.id;if(!h||!canManage())return;const [members,devices]=await Promise.all([rpc('spx_members',{p_hub:h}),rpc('spx_devices_list',{p_hub:h})]);if(hub?.id!==h)return;$('members').replaceChildren(...members.map(m=>{const d=el('div',null,'card');d.append(el('p',m.email+' · '+m.role+' · '+teamLabel(m.team)),btn('Revogar acesso',async()=>{await rpc('spx_set_member_team',{p_hub:h,p_email:m.email,p_role:null,p_team:null});await refreshWorkspace(h);}));return d;}));$('devices').replaceChildren(...devices.map(v=>{const d=el('div',null,'card');d.append(el('p',(v.label||'Computador')+' · '+v.state),el('small',v.id+' · última leitura: '+new Date(v.last_seen).toLocaleString('pt-BR')));if(v.state==='active')d.append(btn('Revogar instalação',async()=>{await rpc('spx_revoke_device',{p_hub:h,p_device:v.id});await management();}));return d;}));}
+async function selectHub(id){const sub=++subEpoch;++epoch;hub=workspace.hubs.find(x=>x.id===id)||null;seen.clear();drafts.clear();pendingSound=false;$('queue').replaceChildren();$('history').replaceChildren();$('metrics').replaceChildren();$('members').replaceChildren();$('devices').replaceChildren();$('manage').hidden=!canManage();$('sound').hidden=!canWork();$('hubrole').textContent=hub?hub.code+(hub.station_id?' · Estação '+hub.station_id:'')+' · '+hub.role+' · '+teamLabel(hub.team):'Nenhum HUB autorizado. Solicite acesso ao gerente.';$('connection').dataset.live='false';$('connection').textContent=hub?'Conectando ao HUB…':'Sem HUB selecionado';if(channel){await db.removeChannel(channel);channel=null;}if(sub!==subEpoch||!hub)return;localStorage.setItem('spxHub',hub.id);const h=hub.id;if(canWork())unlock();channel=db.channel('hub-'+h+'-'+sub).on('postgres_changes',{event:'*',schema:'public',table:'spx_calls',filter:'hub_id=eq.'+h},()=>{if(sub===subEpoch)load().catch(e=>msg(e.message));}).subscribe(s=>{if(sub===subEpoch){$('connection').dataset.live=String(s==='SUBSCRIBED');$('connection').textContent=s==='SUBSCRIBED'?'Conectado em tempo real · '+hub.code:'Conexão: '+s;if(s==='SUBSCRIBED')load().catch(e=>msg(e.message));}});await Promise.all([load(),management()]);}
+async function refreshWorkspace(preferred){workspace=await rpc('spx_team_workspace');if(!workspace.email)throw Error('Acesso corporativo verificado obrigatório.');$('profile').textContent=workspace.email+' · '+(workspace.global_role||'Acesso por HUB');$('newhub').hidden=!['developer','manager'].includes(workspace.global_role);$('global').hidden=workspace.global_role!=='developer';const s=$('hubselect');s.replaceChildren(...workspace.hubs.map(h=>{const o=el('option',h.code+' — '+h.name);o.value=h.id;return o;}));const chosen=workspace.hubs.find(h=>h.id===(preferred||localStorage.getItem('spxHub')))||workspace.hubs[0];if(chosen)s.value=chosen.id;await selectHub(chosen?.id);}
+$('hubselect').onchange=()=>selectHub($('hubselect').value).catch(e=>msg(e.message));
+form('hubform',async()=>{const id=await rpc('spx_create_hub_station',{p_code:$('hubcode').value,p_name:$('hubname').value,p_station:$('hubstation').value.trim()});$('hubform').reset();await refreshWorkspace(id);});
+form('globalform',()=>rpc('spx_set_global_manager',{p_email:$('manageremail').value,p_enabled:true}));
+$('globalrevoke').onclick=async()=>{try{await rpc('spx_set_global_manager',{p_email:$('manageremail').value,p_enabled:false});msg('Permissão global revogada. Acessos locais são independentes.');}catch(e){msg(e.message);}};
+form('memberform',async()=>{const h=hub.id;await rpc('spx_set_member_team',{p_hub:h,p_email:$('memberemail').value,p_role:$('memberrole').value,p_team:$('memberteam').value||null});await management();$('memberform').reset();});
+async function start(){const {data}=await db.auth.getUser();if(!data?.user)return;me=data.user;const w=await rpc('spx_team_workspace');if(!w.email){await db.auth.signOut();msg('Acesso corporativo verificado obrigatório.');return;}$('login').hidden=true;$('panel').hidden=false;$('operator').hidden=true;await refreshWorkspace();}
+start().catch(e=>msg('Não foi possível iniciar o painel multi-HUB: '+e.message));setInterval(()=>load().catch(e=>msg(e.message)),30000);setInterval(tick,1000);
+
+const today=new Intl.DateTimeFormat('sv-SE',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+$('reportstart').value=today;$('reportend').value=today;
+function csvCell(value){let s=value==null?'':String(value);if(typeof value==='string'&&/^[\s\u0000-\u001f]*[=+\-@]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';}
+function saveCSV(rows,name){const blob=new Blob(['\ufeff',rows.map(row=>row.map(csvCell).join(';')).join('\r\n')],{type:'text/csv;charset=utf-8;'});const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),3000);}
+function secs(a,b){return a&&b?Math.max(0,Math.round((Date.parse(b)-Date.parse(a))/1000)):null;}
+function time(t){return t?new Date(t).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'}):'';}
+async function exportReport(summary){const status=$('reportstatus'),buttons=$('reportform').querySelectorAll('button');buttons.forEach(b=>b.disabled=true);try{
+ if(!hub)throw Error('Selecione um HUB.');
+ const h=hub.id,code=hub.code,from=$('reportstart').value,to=$('reportend').value,shift=$('reportshift').value;
+ if(!from||!to||from>to)throw Error('Período inválido.');
+ const end=new Date(to+'T00:00:00-03:00');end.setUTCDate(end.getUTCDate()+1);
+ let rows=[],cursor=0;const cutoff=new Date().toISOString();
+ for(;;){let q=db.from('spx_calls').select(columns).eq('hub_id',h).eq('source','production').gte('created',from+'T00:00:00-03:00').lt('created',end.toISOString()).lte('created',cutoff).gt('seq',cursor).order('seq').limit(500);if(shift)q=q.eq('shift',shift);const r=await q;if(r.error)throw Error(r.error.message);if(!r.data.length)break;rows.push(...r.data);cursor=r.data.at(-1).seq;status.textContent='Coletando '+rows.length+' chamados…';}
+ if(hub?.id!==h)throw Error('HUB alterado durante a exportação. Tente novamente.');
+ const filename='SPX_'+code+'_'+from+'_'+to+(shift?'_'+shift:'');
+ if(summary){const head=['HUB','Turno','Chamados','Aguardando','Em atendimento','Finalizados','Rechamadas','Pacotes removidos confirmados','Validações Fleet','Validações Inventário','Divergências abertas','Média espera (s)','Média resolução (s)','Média total (s)'];
+ const calc=(label,rs)=>{const done=rs.filter(x=>x.status==='done'),avg=values=>{const v=values.filter(x=>x!=null);return v.length?Math.round(v.reduce((a,b)=>a+b,0)/v.length):'';};return [code,label,rs.length,rs.filter(x=>x.status==='waiting').length,rs.filter(x=>x.status==='working').length,done.length,rs.reduce((s,x)=>s+(x.recall_count||0),0),done.reduce((s,x)=>s+(x.removed||0),0),rs.filter(x=>x.fleet_validated).length,rs.filter(x=>x.inventory_validated).length,rs.filter(x=>x.status!=='done'&&x.fleet_validated&&x.inventory_validated&&(x.fleet_removed!==x.inventory_removed||x.fleet_reason!==x.inventory_reason)).length,avg(rs.map(x=>secs(x.created,x.claimed))),avg(done.map(x=>secs(x.claimed,x.finished))),avg(done.map(x=>secs(x.created,x.finished)))];};
+ saveCSV([head,calc(shift||'Todos',rows),...(!shift?['AM','PM'].map(s=>calc(s,rows.filter(x=>x.shift===s))):[])],filename+'_resumo.csv');
+ }else{const head=['HUB','Chamado','Bancada','Turno','Destino inicial/atual','Status','Solicitado','Primeiro atendimento','Finalizado','Espera (s)','Resolução (s)','Tempo total (s)','Rechamadas','Última rechamada','Equipe da rechamada','Analista Fleet','Fleet assumiu','Fleet validou','Fleet quantidade','Fleet motivo','Fleet observações','Analista Inventário','Inventário assumiu','Inventário validou','Inventário quantidade','Inventário motivo','Inventário observações','Removidos confirmados','Motivo confirmado'];
+ saveCSV([head,...rows.map(x=>[code,x.id,x.dock,x.shift,teamLabel(x.target_team),({waiting:'Aguardando',working:'Em atendimento',done:'Finalizado'}[x.status]),time(x.created),time(x.claimed),time(x.finished),secs(x.created,x.claimed),secs(x.claimed,x.finished),secs(x.created,x.finished),x.recall_count,time(x.last_recall),x.last_recall_team?teamLabel(x.last_recall_team):'',x.fleet_name,time(x.fleet_claimed),time(x.fleet_validated),x.fleet_removed,x.fleet_reason,x.fleet_notes,x.inventory_name,time(x.inventory_claimed),time(x.inventory_validated),x.inventory_removed,x.inventory_reason,x.inventory_notes,x.removed,x.reason])],filename+'_detalhado.csv');}
+ status.textContent='Relatório gerado: '+rows.length+' chamados.';
+ }catch(e){status.textContent=e.message;}finally{buttons.forEach(b=>b.disabled=false);}}
+$('reportform').onsubmit=e=>{e.preventDefault();exportReport(false);};
+$('summaryexport').onclick=()=>exportReport(true);
